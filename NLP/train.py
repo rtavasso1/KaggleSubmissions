@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import numpy as np
 import pandas as pd
 import gensim.downloader
@@ -43,13 +44,11 @@ df_train = pd.read_csv('train.csv')
 df_test = pd.read_csv('test.csv')
 
 # Select model
-ans = input('LSTM or Transformer: ')
+#ans = input('LSTM or Transformer: ')
+ans = 'Transformer'
 
-# Define label vector
-if ans == 'LSTM':
-    y = df_train['target'].values.astype('float')
-if ans == 'Transformer':
-    y = np.repeat(df_train['target'].values.astype('float').reshape(-1,1),300,axis=1)
+# Labels
+y = df_train['target'].values.astype('float')
 
 # Split train into train/val
 df_train, df_val, y_train, y_val = train_test_split(df_train, y, test_size=0.2, random_state=42)
@@ -117,17 +116,22 @@ class LSTM(nn.Module):
         out = self.fc(out[:, -1, :])
         return out
 
-# Call model
-if ans == 'LSTM':
-    lstm_model()
-if ans == 'Transformer':
-    transformer()
+class transformer(nn.Module):
+    def __init__(self,dims=300,nheads=4):
+        super().__init__()
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=dims, nhead=nheads)
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=6)
+        self.linear = nn.Linear(dims*44, 1)
+    def forward(self, x):
+        out = self.transformer_encoder(x).reshape(-1,44*300)
+        out = self.linear(out)
+        return out
 
 def lstm_model():
     model = LSTM(input_size=300, hidden_size=200, num_layers=2, num_classes=1).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    num_epochs = 20
+    num_epochs = 10
     for epoch in range(num_epochs):
         correct_train = correct_val = 0
         for i, batch in enumerate(train_loader):
@@ -165,19 +169,19 @@ def lstm_model():
 Achieves ~80% accuracy; top 25%
 """
 
-def transformer():  
-    model = nn.Transformer(d_model=300, nhead=4, batch_first=True).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    
-    num_epochs = 10
+def transformer_model():
+    model = transformer(dims=300,nheads=10).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.000005)
+
+    num_epochs = 20
     for epoch in range(num_epochs):
         correct_train = correct_val = 0
         for batch in train_loader:
             model.train()
             x = batch[0].float().to(device)
-            y = batch[1].float().reshape(batch_size,1,300).to(device)
-            y_pred = model(x,y) 
-            loss = F.mse_loss(y_pred[:,0,0], y[:,0,0])
+            y = batch[1].float().to(device)
+            y_pred = model(x).reshape(batch_size,)
+            loss = F.mse_loss(y_pred, y)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -185,11 +189,30 @@ def transformer():
         for i, batch in enumerate(val_loader):
             model.eval()
             x = batch[0].float().to(device)
-            y = batch[1].float().reshape(batch_size,1,300).to(device)
-            y_pred = model(x,y)[:,0,0]
-            correct_val += (y_pred.round() == y[:,0,0]).sum().item()
+            y = batch[1].float().to(device)
+            y_pred = model(x).reshape(batch_size,)
+            correct_val += (y_pred.round() == y).sum().item()
         print(f'Loss: {loss.item():.2f}, Train Accuracy: {correct_train/len(train_loader.dataset):.2f}, Val Accuracy: {correct_val/len(val_loader.dataset):.2f}')
     
+    preds = np.empty((1,1))
+    submission = pd.DataFrame(columns=['id','target'])
+    for x in test_loader:
+        model.eval()
+        x = x.float().to(device)
+        y_pred = model(x).reshape(-1,1)
+        y_pred = y_pred.round()
+        y_pred = y_pred.cpu().detach().numpy()
+        preds = np.concatenate((preds, y_pred))
+    submission.id = df_test['id']
+    submission.target = preds[1:].astype('int')
+    submission.to_csv("submission.csv", index=False)  
 """
 Achieves ~78% accuracy
 """
+
+
+# Call model
+if ans == 'LSTM':
+    lstm_model()
+if ans == 'Transformer':
+    transformer_model()
